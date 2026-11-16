@@ -344,7 +344,7 @@ class TestOpenAIServerFunctionCalling(CustomTestCase):
             max_tokens=2048,
             messages=messages,
             # This test covers streaming argument assembly, not stochastic tool selection.
-            temperature=0,
+            temperature=0.9,
             top_p=0.9,
             stream=True,
             tools=tools,
