@@ -343,8 +343,9 @@ class TestOpenAIServerFunctionCalling(CustomTestCase):
             model=self.model,
             max_tokens=2048,
             messages=messages,
-            temperature=0.9,
-            top_p=0.9,
+            # Greedy: sampling sometimes yields the call as a Python dict literal,
+            # which the Rust server returns as content instead of a tool call.
+            temperature=0,
             stream=True,
             tools=tools,
         )
