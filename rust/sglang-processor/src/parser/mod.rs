@@ -22,6 +22,7 @@ use serde::de::DeserializeOwned;
 use crate::ProcessorError;
 use crate::think::ReasoningOptions;
 
+mod llama3;
 mod reasoning;
 mod tools;
 

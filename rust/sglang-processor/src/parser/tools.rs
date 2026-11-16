@@ -19,6 +19,7 @@ use futures::{Stream, StreamExt};
 use serde_json::Value;
 
 use super::ChatToolCallDelta;
+use super::llama3::{respell_python_dict_call, respell_python_dict_calls};
 use crate::ProcessorError;
 use crate::tool_call::{ToolDetector, tool_call_id, tool_detector};
 
@@ -61,10 +62,12 @@ fn definition(function: FunctionObject) -> ToolDefinition {
     }
 }
 
+const LLAMA3_JSON: &str = "llama3_json";
+
 /// Map SGLang tool-parser aliases onto Dynamo's tool-parser names.
 pub fn dynamo_tool_parser_name(parser: &str) -> &str {
     match parser {
-        "llama3" => "llama3_json",
+        "llama3" => LLAMA3_JSON,
         "qwen" => "qwen25",
         "glm" | "glm45" => "glm47",
         other => other,
@@ -119,7 +122,7 @@ pub fn tool_constraint(
         .get(parser)
         .ok_or_else(|| format!("tool-call parser `{parser}` is not supported by Dynamo"))?;
     let builder = config.structural_tag_builder.clone().or_else(|| {
-        (parser == "llama3_json"
+        (parser == LLAMA3_JSON
             && *tool_choice == ToolChoice::Auto
             && tools.iter().any(|tool| tool.strict.unwrap_or(false)))
         .then(|| {
@@ -219,6 +222,11 @@ where
     let tool_values = tool_values(tools.as_deref());
     let Some(_) = tool_detector(parser, &tool_values) else {
         let parser = dynamo_tool_parser_name(parser).to_owned();
+        let stream: ChunkStream = if parser == LLAMA3_JSON {
+            Box::pin(respell_python_dict_calls(stream))
+        } else {
+            Box::pin(stream)
+        };
         return Box::pin(apply_tool_calling_jail(
             Some(parser),
             tool_choice,
@@ -279,6 +287,13 @@ pub async fn parse_tool_calls(
 ) -> Result<(Vec<ToolCallResponse>, Option<String>), String> {
     let Some(detector) = tool_detector(parser, &tool_values(tools)) else {
         let parser = dynamo_tool_parser_name(parser);
+        let respelled;
+        let text = if parser == LLAMA3_JSON {
+            respelled = respell_python_dict_call(text);
+            respelled.as_str()
+        } else {
+            text
+        };
         return try_tool_call_parse_aggregate_finalize(text, Some(parser), tools)
             .await
             .map_err(|error| error.to_string());
