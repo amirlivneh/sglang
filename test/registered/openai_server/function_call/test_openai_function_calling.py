@@ -347,6 +347,7 @@ class TestOpenAIServerFunctionCalling(CustomTestCase):
             top_p=0.9,
             stream=True,
             tools=tools,
+            tool_choice="required",
         )
 
         argument_fragments = []
