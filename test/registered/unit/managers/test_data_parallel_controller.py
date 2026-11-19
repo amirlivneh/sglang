@@ -550,21 +550,34 @@ class TestTotalTokensScheduler(CustomTestCase):
         self.assertEqual(ctl.dp_budget.total_tokens, [10, 3])
 
 
-class TestStatusAwarenessInconsistency(CustomTestCase):
-    """Document a divergence: ``round_robin_scheduler`` routes only through
-    ``_active_workers``, but ``total_requests_scheduler`` / ``total_tokens_scheduler``
-    route purely by DPBudget — they do NOT consult ``self.status`` or
-    ``_active_workers``. If a future change unifies this behaviour, this test will fail
-    and force a reviewer to confirm intent."""
+class TestLoadAwareActiveRanks(CustomTestCase):
+    def test_load_policies_skip_inactive_ranks_until_reactivated(self):
+        for scheduler in ("total_requests_scheduler", "total_tokens_scheduler"):
+            with self.subTest(scheduler=scheduler):
+                ctl = _make_controller(num_dp_ranks=3)
+                ctl.dp_budget.total_requests = [5, 3, 1]
+                ctl.dp_budget.total_tokens = [50, 30, 10]
+                ctl.update_active_ranks(ActiveRanksOutput(status=[True, True, False]))
 
-    def test_total_requests_ignores_status(self):
-        ctl = _make_controller(num_dp_ranks=4)
-        # Worker 2 is the global minimum AND marked inactive.
-        ctl.dp_budget.total_requests = [5, 3, 1, 4]
-        ctl.status[2] = False
-        ctl.total_requests_scheduler(_req())
-        # Current behaviour: still dispatches to the inactive worker.
-        ctl.workers[2].send_pyobj.assert_called_once()
+                dispatch = getattr(ctl, scheduler)
+                dispatch(_req(input_ids=[1, 2]))
+                ctl.workers[1].send_pyobj.assert_called_once()
+                ctl.workers[2].send_pyobj.assert_not_called()
+                self.assertEqual(ctl.dp_budget.total_requests, [5, 4, 1])
+
+                ctl.update_active_ranks(ActiveRanksOutput(status=[True, True, True]))
+                dispatch(_req(input_ids=[1, 2]))
+                ctl.workers[2].send_pyobj.assert_called_once()
+
+    def test_no_active_load_aware_target(self):
+        ctl = _make_controller(num_dp_ranks=2)
+        ctl.update_active_ranks(ActiveRanksOutput(status=[False, False]))
+        for dispatch in (ctl.total_requests_scheduler, ctl.total_tokens_scheduler):
+            with self.assertRaisesRegex(RuntimeError, "No active DP workers"):
+                dispatch(_req(input_ids=[1, 2]))
+        for worker in ctl.workers:
+            worker.send_pyobj.assert_not_called()
+        self.assertEqual(ctl.dp_budget.total_requests, [0, 0])
 
 
 class TestUpdateActiveRanks(CustomTestCase):

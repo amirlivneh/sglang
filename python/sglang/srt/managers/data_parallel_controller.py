@@ -121,7 +121,6 @@ class LoadBalanceMethod(Enum):
 
 class DPBudget:
     def __init__(self, num_dp_ranks: int):
-        self.num_dp_ranks = num_dp_ranks
         self.total_requests = [0] * num_dp_ranks
         self.total_tokens = [0] * num_dp_ranks
         self.last_timestamp = [0.0] * num_dp_ranks
@@ -137,13 +136,22 @@ class DPBudget:
             )
             self.total_tokens[load.dp_rank] = load.num_total_tokens
 
-    def dispatch(self, method: LoadBalanceMethod, estimated_tokens: int = 0):
+    def dispatch(
+        self,
+        method: LoadBalanceMethod,
+        *,
+        active_ranks: list[int],
+        estimated_tokens: int = 0,
+    ):
+        if not active_ranks:
+            raise RuntimeError("No active DP workers are available for routing.")
+
         if method == LoadBalanceMethod.TOTAL_REQUESTS:
-            target_rank = self.total_requests.index(min(self.total_requests))
+            target_rank = min(active_ranks, key=self.total_requests.__getitem__)
         elif method == LoadBalanceMethod.TOTAL_TOKENS:
             # Use total_requests as a tie-breaker when total_tokens are equal
             target_rank = min(
-                range(self.num_dp_ranks),
+                active_ranks,
                 key=lambda i: (self.total_tokens[i], self.total_requests[i]),
             )
         else:
@@ -899,7 +907,9 @@ class DataParallelController:
     def total_requests_scheduler(self, req: Req):
         if self.maybe_external_dp_rank_routing(req):
             return
-        target_worker = self.dp_budget.dispatch(LoadBalanceMethod.TOTAL_REQUESTS)
+        target_worker = self.dp_budget.dispatch(
+            LoadBalanceMethod.TOTAL_REQUESTS, active_ranks=self._active_workers
+        )
         sock_send(self.workers[target_worker], req)
 
     def total_tokens_scheduler(self, req: Req):
@@ -910,7 +920,9 @@ class DataParallelController:
             len(req.input_ids) if req.input_ids is not None else len(req.input_embeds)
         )
         target_worker = self.dp_budget.dispatch(
-            LoadBalanceMethod.TOTAL_TOKENS, estimated_tokens=estimated_tokens
+            LoadBalanceMethod.TOTAL_TOKENS,
+            active_ranks=self._active_workers,
+            estimated_tokens=estimated_tokens,
         )
         sock_send(self.workers[target_worker], req)
 
