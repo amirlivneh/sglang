@@ -5,12 +5,11 @@ import unittest
 
 from sglang.srt.managers.communicator import FanOutCommunicator
 from sglang.test.ci.ci_register import register_cpu_ci
-from sglang.test.test_utils import CustomTestCase
 
 register_cpu_ci(est_time=11, suite="base-a-test-cpu")
 
 
-class TestQueueingCall(CustomTestCase):
+class TestQueueingCall(unittest.TestCase):
     def test_concurrent_caller_cannot_bypass_queue(self):
         """A new caller arriving in the wakeup window must not overtake a
         queued caller (this interleaving used to raise AssertionError and
@@ -41,10 +40,68 @@ class TestQueueingCall(CustomTestCase):
                 await asyncio.sleep(0)
 
             # All callers complete without error, in strict FIFO order.
-            await asyncio.gather(*tasks)
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
             self.assertEqual(sent, ["A", "B", "C"])
 
         asyncio.run(scenario())
+
+
+class TestQueueingCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_call_drains_its_original_fan_out(self):
+        sent = []
+        comm = FanOutCommunicator(send=sent.append, fan_out=2)
+        first = asyncio.create_task(comm("A"))
+        await asyncio.sleep(0)
+        self.assertEqual(sent, ["A"])
+        comm.handle_recv("A0")
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+
+        # The old call still expects its second reply after the fan-out changes.
+        comm.set_fan_out(1)
+        skipped = asyncio.create_task(comm("cancelled while queued"))
+        await asyncio.sleep(0)
+        skipped.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await skipped
+
+        next_call = asyncio.create_task(comm("B"))
+        await asyncio.sleep(0)
+        self.assertEqual(sent, ["A"])
+        comm.handle_recv("A1")
+        await asyncio.sleep(0)
+        self.assertEqual(sent, ["A", "B"])
+        self.assertFalse(next_call.done())
+        comm.handle_recv("B0")
+        self.assertEqual(await asyncio.wait_for(next_call, timeout=2), ["B0"])
+
+    async def test_cancellation_after_final_reply_releases_next_call(self):
+        sent = []
+        comm = FanOutCommunicator(send=sent.append, fan_out=1)
+        first = asyncio.create_task(comm("A"))
+        await asyncio.sleep(0)
+        comm.handle_recv("A0")
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+
+        next_call = asyncio.create_task(comm("B"))
+        await asyncio.sleep(0)
+        self.assertEqual(sent, ["A", "B"])
+        comm.handle_recv("B0")
+        self.assertEqual(await asyncio.wait_for(next_call, timeout=2), ["B0"])
+
+    async def test_send_failure_releases_collector(self):
+        def send(request):
+            if request == "A":
+                raise RuntimeError("send failed")
+            comm.handle_recv("B0")
+
+        comm = FanOutCommunicator(send=send, fan_out=1)
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            await comm("A")
+        self.assertEqual(await asyncio.wait_for(comm("B"), timeout=2), ["B0"])
 
 
 if __name__ == "__main__":

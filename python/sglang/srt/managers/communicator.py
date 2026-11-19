@@ -39,22 +39,30 @@ class FanOutCommunicator(Generic[T]):
         assert mode in ["queueing", "watching"]
 
     async def queueing_call(self, obj: T):
-        # asyncio.Lock is FIFO-fair: a new caller cannot acquire while earlier
-        # callers are still waiting, so requests are strictly serialized in
-        # arrival order. It also releases on exception/cancellation, so a
-        # failed caller never blocks the callers queued behind it.
         async with self._queueing_lock:
-            if obj is not None:
-                self._send(obj)
+            # Replies are dispatched by type. If a caller was cancelled after
+            # sending, keep its collector until its captured fan-out drains.
+            if self._result_event is not None:
+                await self._result_event.wait()
 
             self._result_event = asyncio.Event()
             self._result_values = []
             self._result_fan_out = self._fan_out
+            try:
+                if obj is not None:
+                    self._send(obj)
+            except BaseException:
+                self._clear_result()
+                raise
+
             await self._result_event.wait()
             result_values = self._result_values
-            self._result_event = self._result_values = None
-            self._result_fan_out = None
+            self._clear_result()
             return result_values
+
+    def _clear_result(self) -> None:
+        self._result_event = self._result_values = None
+        self._result_fan_out = None
 
     async def watching_call(self, obj):
         if self._result_event is None:
@@ -74,8 +82,7 @@ class FanOutCommunicator(Generic[T]):
 
         result_values = copy.deepcopy(values)
         if self._result_event is event:
-            self._result_event = self._result_values = None
-            self._result_fan_out = None
+            self._clear_result()
         return result_values
 
     async def __call__(self, obj):
