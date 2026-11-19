@@ -186,15 +186,15 @@ def test_aborted_session_turn_releases_new_media_not_history(vmm_pool):
     """An aborted append owns new media, but only borrows historical features."""
     for rank, item in enumerate(_publish(vmm_pool)):
         session = Session(100, streaming=True)
-        session._inflight = True
         history = MultimodalDataItem(modality=Modality.IMAGE, feature=torch.ones(3))
         req = Req("session-image", "", [1], SamplingParams(), session=session)
+        session._inflight_req = req
         req.multimodal_inputs = MultimodalInputs(mm_items=[history])
         req.extend_image_inputs(MultimodalInputs(mm_items=[item]))
         with _rank(rank):
             _queued_scheduler(req).abort_request(AbortReq(rid=req.rid))
         assert torch.equal(history.feature, torch.ones(3))
-        assert not session._inflight
+        assert session._inflight_req is None
     vmm_pool._recycle_chunks()
     assert not vmm_pool.occupied_chunks
 

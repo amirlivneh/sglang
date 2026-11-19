@@ -24,13 +24,17 @@ import torch
 
 from sglang.srt.managers.io_struct import CloseSessionReqInput
 from sglang.srt.managers.req_types import (
+    FINISH_ABORT,
     FINISH_LENGTH,
     MultimodalDataItem,
     MultimodalInputs,
 )
+from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams
+from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.multimodal.modality import Modality
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.session.session_controller import Session, SessionController
+from sglang.srt.session.streaming_session import StreamingSession
 from sglang.test.test_utils import CustomTestCase
 
 VOCAB = 1 << 20
@@ -158,7 +162,7 @@ class TestSessionTokenShare(CustomTestCase):
         r2 = self._create("r2", [2])
         self.assertEqual(r2.get_mm_token_counts(), (2, 3, 4))
         r2.mm_image_tokens = 5
-        self.session.abort_req()
+        self.session.abort_req(r2)
 
         r3 = self._create("r3", [3])
         self.assertEqual(r3.get_mm_token_counts(), (2, 3, 4))
@@ -174,7 +178,7 @@ class TestSessionTokenShare(CustomTestCase):
         self.assertEqual(list(r2.origin_input_ids), in1 + out1 + [50, 51])
         r2.output_ids.extend([6, 7])
         r2.refresh_fill_ids()
-        self.session.abort_req()
+        self.session.abort_req(r2)
         self.assertEqual(self.session.committed_origin_len, len(in1))
 
         # Turn 3 must see exactly r1's history — no [50, 51], no doubled out1.
@@ -183,16 +187,16 @@ class TestSessionTokenShare(CustomTestCase):
         self.assertEqual(list(r3.full_untruncated_fill_ids), list(r3.origin_input_ids))
 
         # Two aborted attempts in a row heal idempotently.
-        self.session.abort_req()
+        self.session.abort_req(r3)
         r4 = self._create("r4", [70])
         self.assertEqual(list(r4.origin_input_ids), in1 + out1 + [70])
         self.assertEqual(list(r4.full_untruncated_fill_ids), list(r4.origin_input_ids))
 
     def test_first_turn_abort(self):
-        self._create("r1", [1, 2, 3])
-        self.assertTrue(self.session._inflight)
-        self.session.abort_req()
-        self.assertFalse(self.session._inflight)
+        r1 = self._create("r1", [1, 2, 3])
+        self.assertIs(self.session._inflight_req, r1)
+        self.session.abort_req(r1)
+        self.assertIsNone(self.session._inflight_req)
         # No finish_req ran: nothing committed, next turn starts from scratch.
         self.assertIsNone(self.session.committed_origin_len)
         r2 = self._create("r2", [4, 5])
@@ -200,6 +204,33 @@ class TestSessionTokenShare(CustomTestCase):
         self._decode_and_finish(r2, [9])
         r3 = self._create("r3", [6])
         self.assertEqual(list(r3.origin_input_ids), [4, 5, 9, 6])
+
+    def test_rejected_turn_cleanup_keeps_the_live_kv_row_exclusive(self):
+        cache = MagicMock(page_size=1)
+        streaming_cache = StreamingSession(cache)
+        first = self._create("a", [1, 2])
+        first.kv.req_pool_idx = 0
+        first.kv.set_row_len(4)
+        first.kv.protect_prefix(2)
+        streaming_cache.take(first)
+
+        rejected = self._create("b", [1, 2])
+        self.assertIsInstance(rejected.to_finish, FINISH_ABORT)
+        self.assertIsNone(
+            streaming_cache.try_match_prefix(
+                MatchPrefixParams(key=RadixKey(array("q")), req=rejected)
+            )
+        )
+        third = self._create("c", [1, 2, 3])
+        self.assertIsInstance(third.to_finish, FINISH_ABORT)
+        self.assertEqual(first.kv.kv_allocated_len, 4)
+        cache.free_kv_row.assert_not_called()
+
+        self.session.abort_req(first)
+        next_turn = self._create("d", [4])
+        self.assertIsNone(next_turn.to_finish)
+        self.session.abort_req(first)
+        self.assertIs(self.session._inflight_req, next_turn)
 
     def test_max_new_tokens_overshoot_falls_back(self):
         in1 = list(range(300, 310))

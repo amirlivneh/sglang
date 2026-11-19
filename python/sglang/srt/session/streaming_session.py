@@ -87,7 +87,7 @@ class StreamingSession:
             return None
         if req.to_finish is not None:
             req.release_mm_inputs_on_abort()
-            req.session.abort_req()
+            req.session.abort_req(req)
             req.session = None
             return None
         return slot
@@ -186,7 +186,7 @@ class StreamingSession:
             del self.slots[req.session.session_id]
             req.lock, slot.lock = slot.lock, None
             req.release_mm_inputs_on_abort()
-            req.session.abort_req()
+            req.session.abort_req(req)
             return False
 
         finished_len = (

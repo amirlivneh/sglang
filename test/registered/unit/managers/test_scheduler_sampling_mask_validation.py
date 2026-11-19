@@ -181,7 +181,7 @@ class TestSchedulerSamplingMaskValidation(CustomTestCase):
                     ),
                 ):
                     scheduler.handle_generate_request(recv_req)
-                self.assertFalse(session._inflight)
+                self.assertIsNone(session._inflight_req)
 
 
 if __name__ == "__main__":

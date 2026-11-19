@@ -92,8 +92,7 @@ class _FakeReq:
             session_id=session_id,
             streaming=True,
             finish_req=lambda req: None,
-            abort_req=lambda: None,
-            _inflight=False,
+            abort_req=lambda req: None,
         )
         self.kv = ReqKvInfo(
             req_pool_idx=req_pool_idx,

@@ -51,7 +51,7 @@ class Session:
         # rid -> that turn's request; a new turn may continue from any of them.
         self.turns: Dict[str, Req] = {}
         self.close_on_finish: bool = False
-        self._inflight: bool = False
+        self._inflight_req: Optional[Req] = None
         # Token-array lengths of last_req as of its finish_req. The share path
         # appends speculatively beyond these; only finish_req confirms them, so
         # _share_token_arrays trims back first (heals aborted turns).
@@ -180,7 +180,7 @@ class Session:
             )
         elif self.streaming:
             # Streaming sessions: only simple appends allowed; reject otherwise.
-            if self._inflight:
+            if self._inflight_req is not None:
                 abort = True
                 abort_message = "Streaming session already has an active request."
             elif session_params.drop_previous_output:
@@ -289,16 +289,17 @@ class Session:
         elif self.streaming:
             self.last_active_time = time.monotonic()
             # turns is NOT updated here; finish_req() handles it.
-            self._inflight = True
+            self._inflight_req = new_req
         else:
             self.last_active_time = time.monotonic()
             self.turns[req.rid] = new_req
 
         return new_req
 
-    def finish_req(self, req):
-        """Update turns after a streaming request finishes successfully."""
-        self._inflight = False
+    def finish_req(self, req: Req) -> None:
+        """Commit the active streaming turn after it finishes successfully."""
+        assert self._inflight_req is req
+        self._inflight_req = None
         if self.turns:
             [prev_req] = self.turns.values()
             prev_req.session = None
@@ -309,9 +310,10 @@ class Session:
         self.committed_unpadded_len = len(req.origin_input_ids_unpadded)
         self.committed_fill_len = len(req.full_untruncated_fill_ids)
 
-    def abort_req(self):
-        """Clear inflight flag on abort (turns stays unchanged)."""
-        self._inflight = False
+    def abort_req(self, req: Req) -> None:
+        """Release admission only for the request that acquired it."""
+        if self._inflight_req is req:
+            self._inflight_req = None
 
 
 class SessionController:
@@ -424,7 +426,7 @@ class SessionController:
     def _has_live_readers(session: Session) -> bool:
         """Whether a request still reads what closing `session` frees: the
         streaming turn in flight, or an unfinished turn that holds media."""
-        return session._inflight or any(
+        return session._inflight_req is not None or any(
             not turn.finished() and turn.multimodal_inputs is not None
             for turn in session.turns.values()
         )
