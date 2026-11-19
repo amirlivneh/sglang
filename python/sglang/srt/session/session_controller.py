@@ -51,7 +51,8 @@ class Session:
         # rid -> that turn's request; a new turn may continue from any of them.
         self.turns: Dict[str, Req] = {}
         self.close_on_finish: bool = False
-        self._inflight: bool = False
+        # The streaming turn running on the session's KV, if any.
+        self._inflight_req: Optional[Req] = None
         # Token-array lengths of last_req as of its finish_req. The share path
         # appends speculatively beyond these; only finish_req confirms them, so
         # _share_token_arrays trims back first (heals aborted turns).
@@ -289,7 +290,7 @@ class Session:
         elif self.streaming:
             self.last_active_time = time.monotonic()
             # turns is NOT updated here; finish_req() handles it.
-            self._inflight = True
+            self._inflight_req = new_req
         else:
             self.last_active_time = time.monotonic()
             self.turns[req.rid] = new_req
@@ -298,7 +299,7 @@ class Session:
 
     def finish_req(self, req):
         """Update turns after a streaming request finishes successfully."""
-        self._inflight = False
+        self._inflight_req = None
         if self.turns:
             [prev_req] = self.turns.values()
             prev_req.session = None
@@ -309,9 +310,15 @@ class Session:
         self.committed_unpadded_len = len(req.origin_input_ids_unpadded)
         self.committed_fill_len = len(req.full_untruncated_fill_ids)
 
-    def abort_req(self):
-        """Clear inflight flag on abort (turns stays unchanged)."""
-        self._inflight = False
+    @property
+    def _inflight(self) -> bool:
+        return self._inflight_req is not None
+
+    def abort_req(self, req: Req):
+        """An aborted request leaves the session (turns stays unchanged); only
+        the in-flight turn frees it for the next one, never a turn it rejected."""
+        if req is self._inflight_req:
+            self._inflight_req = None
 
 
 class SessionController:

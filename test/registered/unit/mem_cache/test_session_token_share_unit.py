@@ -24,14 +24,17 @@ import torch
 
 from sglang.srt.managers.io_struct import CloseSessionReqInput
 from sglang.srt.managers.req_types import (
+    FINISH_ABORT,
     FINISH_LENGTH,
     MultimodalDataItem,
     MultimodalInputs,
 )
 from sglang.srt.multimodal.modality import Modality
+from sglang.srt.runtime_context import get_parallel
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.session.session_controller import Session, SessionController
-from sglang.test.test_utils import CustomTestCase
+from sglang.test.scheduler_test_utils import release_only_retirer
+from sglang.test.test_utils import CustomTestCase, enter_scope
 
 VOCAB = 1 << 20
 
@@ -158,7 +161,7 @@ class TestSessionTokenShare(CustomTestCase):
         r2 = self._create("r2", [2])
         self.assertEqual(r2.get_mm_token_counts(), (2, 3, 4))
         r2.mm_image_tokens = 5
-        self.session.abort_req()
+        self.session.abort_req(r2)
 
         r3 = self._create("r3", [3])
         self.assertEqual(r3.get_mm_token_counts(), (2, 3, 4))
@@ -174,7 +177,7 @@ class TestSessionTokenShare(CustomTestCase):
         self.assertEqual(list(r2.origin_input_ids), in1 + out1 + [50, 51])
         r2.output_ids.extend([6, 7])
         r2.refresh_fill_ids()
-        self.session.abort_req()
+        self.session.abort_req(r2)
         self.assertEqual(self.session.committed_origin_len, len(in1))
 
         # Turn 3 must see exactly r1's history — no [50, 51], no doubled out1.
@@ -183,15 +186,15 @@ class TestSessionTokenShare(CustomTestCase):
         self.assertEqual(list(r3.full_untruncated_fill_ids), list(r3.origin_input_ids))
 
         # Two aborted attempts in a row heal idempotently.
-        self.session.abort_req()
+        self.session.abort_req(r3)
         r4 = self._create("r4", [70])
         self.assertEqual(list(r4.origin_input_ids), in1 + out1 + [70])
         self.assertEqual(list(r4.full_untruncated_fill_ids), list(r4.origin_input_ids))
 
     def test_first_turn_abort(self):
-        self._create("r1", [1, 2, 3])
+        r1 = self._create("r1", [1, 2, 3])
         self.assertTrue(self.session._inflight)
-        self.session.abort_req()
+        self.session.abort_req(r1)
         self.assertFalse(self.session._inflight)
         # No finish_req ran: nothing committed, next turn starts from scratch.
         self.assertIsNone(self.session.committed_origin_len)
@@ -291,6 +294,56 @@ class TestSessionTeardown(CustomTestCase):
                 self._reap()
                 self.assertNotIn("s", self.controller)
                 self.assertIsNone(item.feature)
+
+
+class TestStreamingSessionRejectedTurn(CustomTestCase):
+    """A turn a streaming session rejects because another turn is in flight
+    must not release the in-flight turn's hold on the session: the session
+    still refuses a third concurrent turn and defers its close."""
+
+    def setUp(self):
+        enter_scope(self, get_parallel().override(tp_rank=0))
+        self.tree_cache = MagicMock()
+        self.controller = SessionController(self.tree_cache)
+        self.controller.open(
+            SimpleNamespace(
+                session_id="s", capacity_of_str_len=0, streaming=True, timeout=None
+            )
+        )
+        self.session = self.controller.get("s")
+
+    def _create(self, rid):
+        return self.session.create_req(
+            _recv(rid, [1, 2, 3]), tokenizer=None, vocab_size=VOCAB
+        )
+
+    def _retire_rejected(self, req):
+        # The scheduler queues the rejected turn with its abort pending and
+        # retires it like any aborted request.
+        req.update_finish_state()
+        release_only_retirer(tree_cache=self.tree_cache).release(
+            req, checkpoint=False
+        )
+
+    def test_rejected_turn_keeps_running_turn_exclusive(self):
+        running = self._create("running")
+        self.assertIsNone(running.to_finish)
+        rejected = self._create("rejected")
+        self.assertIsInstance(rejected.to_finish, FINISH_ABORT)
+        self._retire_rejected(rejected)
+
+        third = self._create("third")
+        self.assertIsInstance(third.to_finish, FINISH_ABORT)
+
+    def test_rejected_turn_does_not_let_close_free_running_turn_kv(self):
+        running = self._create("running")
+        self._retire_rejected(self._create("rejected"))
+
+        self.controller.close(CloseSessionReqInput(session_id="s"))
+
+        self.tree_cache.release_session.assert_not_called()
+        self.assertIn("s", self.controller)
+        self.assertIs(running.session, self.session)
 
 
 if __name__ == "__main__":

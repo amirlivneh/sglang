@@ -171,7 +171,7 @@ class RequestRetirer:
         req.get_mm_token_counts()
         req.release_mm_inputs_on_abort()
         if req.session is not None and req.session.streaming:
-            req.session.abort_req()
+            req.session.abort_req(req)
         if self.uocr_runtime is not None:
             self.uocr_runtime.on_req_dropped(req)
 

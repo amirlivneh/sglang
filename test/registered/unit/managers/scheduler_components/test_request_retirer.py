@@ -70,7 +70,7 @@ def _req(finished_reason, calls):
         finished_reason=finished_reason,
         cache_request_handle=object(),
         session=SimpleNamespace(
-            streaming=True, abort_req=lambda: calls.append("session")
+            streaming=True, abort_req=lambda req: calls.append("session")
         ),
         get_mm_token_counts=lambda: calls.append("counts"),
         release_mm_inputs_on_abort=lambda: calls.append("mm"),
